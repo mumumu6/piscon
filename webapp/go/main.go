@@ -170,6 +170,19 @@ type JIAServiceRequest struct {
 	IsuUUID       string `json:"isu_uuid"`
 }
 
+type IsuConditionDetail struct {
+	ID         int       `db:"id" json:"id"`
+	JIAIsuUUID string    `db:"jia_isu_uuid" json:"jia_isu_uuid"`
+	Name       string    `db:"name" json:"name"`
+	Character  string    `db:"character" json:"character"`
+
+	Timestamp  time.Time `db:"timestamp"`
+	IsSitting  bool      `db:"is_sitting"`
+	Condition  string    `db:"condition"`
+	Message    string    `db:"message"`
+	CreatedAt  time.Time `db:"created_at"`
+}
+
 func getEnv(key string, defaultValue string) string {
 	val := os.Getenv(key)
 	if val != "" {
@@ -459,56 +472,51 @@ func getIsuList(c echo.Context) error {
 	}
 	defer tx.Rollback()
 
-	isuList := []Isu{}
+	var isuCount int
+	err = tx.Get(&isuCount, "SELECT COUNT(*) FROM `isu` WHERE `jia_user_id` = ?", jiaUserID)
+
+	isuDetails := []IsuConditionDetail{}
 	err = tx.Select(
-		&isuList,
-		"SELECT * FROM `isu` WHERE `jia_user_id` = ? ORDER BY `id` DESC",
+		&isuDetails,
+		"SELECT isu.id, isu.jia_isu_uuid, isu.name, isu.character, isu_condition.timestamp, isu_condition.is_sitting, isu_condition.condition, isu_condition.message, isu.created_at FROM isu JOIN isu_condition ON isu.jia_isu_uuid = isu_condition.jia_isu_uuid WHERE isu.jia_user_id = ? ORDER BY isu_condition.timestamp DESC",
 		jiaUserID)
 	if err != nil {
 		c.Logger().Errorf("db error: %v", err)
 		return c.NoContent(http.StatusInternalServerError)
 	}
-
-	responseList := []GetIsuListResponse{}
-	for _, isu := range isuList {
-		var lastCondition IsuCondition
-		foundLastCondition := true
-		err = tx.Get(&lastCondition, "SELECT * FROM `isu_condition` WHERE `jia_isu_uuid` = ? ORDER BY `timestamp` DESC LIMIT 1",
-			isu.JIAIsuUUID)
-		if err != nil {
-			if errors.Is(err, sql.ErrNoRows) {
-				foundLastCondition = false
-			} else {
-				c.Logger().Errorf("db error: %v", err)
-				return c.NoContent(http.StatusInternalServerError)
-			}
+	lastIndexes := make(map[string]int, isuCount)
+	for i, isuDetail := range isuDetails {
+		_, ok := lastIndexes[isuDetail.JIAIsuUUID]
+		if !ok {
+			lastIndexes[isuDetail.JIAIsuUUID] = i
 		}
+	} 
 
-		var formattedCondition *GetIsuConditionResponse
-		if foundLastCondition {
-			conditionLevel, err := calculateConditionLevel(lastCondition.Condition)
-			if err != nil {
-				c.Logger().Error(err)
-				return c.NoContent(http.StatusInternalServerError)
-			}
+	responseList := make([]GetIsuListResponse, 0, isuCount)
 
-			formattedCondition = &GetIsuConditionResponse{
-				JIAIsuUUID:     lastCondition.JIAIsuUUID,
-				IsuName:        isu.Name,
-				Timestamp:      lastCondition.Timestamp.Unix(),
-				IsSitting:      lastCondition.IsSitting,
-				Condition:      lastCondition.Condition,
-				ConditionLevel: conditionLevel,
-				Message:        lastCondition.Message,
-			}
+	for _, index := range lastIndexes {
+		isuDetail := isuDetails[index]
+		conditionLevel, err := calculateConditionLevel(isuDetail.Condition)
+		if err != nil {
+			c.Logger().Error(err)
+			return c.NoContent(http.StatusInternalServerError)
 		}
 
 		res := GetIsuListResponse{
-			ID:                 isu.ID,
-			JIAIsuUUID:         isu.JIAIsuUUID,
-			Name:               isu.Name,
-			Character:          isu.Character,
-			LatestIsuCondition: formattedCondition}
+			ID:         isuDetail.ID,
+			JIAIsuUUID: isuDetail.JIAIsuUUID,
+			Name:       isuDetail.Name,
+			Character:  isuDetail.Character,
+			LatestIsuCondition: &GetIsuConditionResponse{
+				JIAIsuUUID:     isuDetail.JIAIsuUUID,
+				IsuName:        isuDetail.Name,
+				Timestamp:      isuDetail.Timestamp.Unix(),
+				IsSitting:      isuDetail.IsSitting,
+				Condition:      isuDetail.Condition,
+				ConditionLevel: conditionLevel,
+				Message:        isuDetail.Message,
+			},
+		}
 		responseList = append(responseList, res)
 	}
 
